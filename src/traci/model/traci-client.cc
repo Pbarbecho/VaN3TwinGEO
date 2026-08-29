@@ -36,6 +36,11 @@ namespace ns3
 {
   NS_LOG_COMPONENT_DEFINE("TraciClient");
 
+  // Registra el TypeId en la inicialización estática: sin esto, los atributos
+  // --ns3::TraciClient::* de la línea de comandos no existen aún cuando
+  // cmd.Parse() los procesa y ns-3 aborta con "Invalid command-line arguments".
+  NS_OBJECT_ENSURE_REGISTERED (TraciClient);
+
   TypeId
   TraciClient::GetTypeId(void)
   {
@@ -280,6 +285,13 @@ namespace ns3
       {
         // this->TraCIAPI::connect("172.23.208.1", m_sumoPort); // <- to connect to the Windows version of SUMO under WSL2 (Windows "host IP" needs to be customized)
         this->TraCIAPI::connect("localhost", m_sumoPort);
+        // SUMO multi-cliente (--num-clients N): declarar orden 1 (ns-3 manda).
+        // Inocuo con un solo cliente; solo se activa si se pidió --num-clients
+        // vía SumoAdditionalCmdOptions. Ver GUIA_INTEGRACION_SUMO_GEO.md.
+        if (m_sumoAddCmdOpt.find("--num-clients") != std::string::npos)
+          {
+            this->TraCIAPI::setOrder(1);
+          }
       }
     catch (std::exception& e)
       {

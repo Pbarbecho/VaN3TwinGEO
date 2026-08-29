@@ -75,8 +75,9 @@ main (int argc, char *argv[])
   double m_baseline_prr = 150.0;
   bool m_metric_sup = false;
   bool m_security = false;
+  uint32_t m_num_traci_clients = 1;   // >1 => SUMO espera N clientes TraCI (--num-clients)
 
-  double simTime = 100;
+  double simTime = 50;
 
   int numberOfNodes;
   uint32_t nodeCounter = 0;
@@ -99,6 +100,7 @@ main (int argc, char *argv[])
   cmd.AddValue ("netstate-dump-file", "Name of the SUMO netstate-dump file containing the vehicle-related information throughout the whole simulation", sumo_netstate_file_name);
   cmd.AddValue ("baseline", "Baseline for PRR calculation", m_baseline_prr);
   cmd.AddValue ("met-sup","Use the Metric supervisor or not",m_metric_sup);
+  cmd.AddValue ("num-traci-clients","Number of TraCI clients SUMO waits for (>1 enables multi-client, e.g. SUMO-GEO viewer)",m_num_traci_clients);
   cmd.AddValue ("enable-security","Enable security header inside Geonet or not",m_security);
   cmd.AddValue ("penetrationRate", "Rate of vehicles equipped with wireless communication devices", penetrationRate);
 
@@ -227,6 +229,14 @@ main (int argc, char *argv[])
     sumo_additional_options += " --netstate-dump " + sumo_netstate_file_name;
   }
 
+  if(m_num_traci_clients > 1)
+  {
+    // Multi-cliente TraCI: SUMO esperará a los N clientes (VaN3Twin = orden 1,
+    // visor SUMO-GEO = orden 2). El parche de traci-client.cc detecta
+    // "--num-clients" y llama a setOrder(1). Ver GUIA_INTEGRACION_SUMO_GEO.md.
+    sumo_additional_options += " --num-clients " + std::to_string (m_num_traci_clients);
+  }
+
   sumoClient->SetAttribute ("SumoAdditionalCmdOptions", StringValue (sumo_additional_options));
   sumoClient->SetAttribute ("SumoWaitForSocket", TimeValue (Seconds (1.0)));
 
@@ -264,8 +274,13 @@ main (int argc, char *argv[])
   /* callback function for node creation */
   STARTUP_FCN setupNewWifiNode = [&] (std::string vehicleID,TraciClient::StationTypeTraCI_t stationType) -> Ptr<Node>
     {
+      NS_LOG_INFO("setupNewWifiNode called: vehicleID=" << vehicleID << " stationType=" << stationType << " nodeCounter=" << nodeCounter << " poolSize=" << obuNodes.GetN());
+
       if (nodeCounter >= obuNodes.GetN())
-        NS_FATAL_ERROR("Node Pool empty!: " << nodeCounter << " nodes created.");
+        {
+          NS_LOG_ERROR("Node Pool empty detected. nodeCounter=" << nodeCounter << " poolSize=" << obuNodes.GetN() << " vehicleID=" << vehicleID);
+          NS_FATAL_ERROR("Node Pool empty!: " << nodeCounter << " nodes created.");
+        }
 
       Ptr<Node> includedNode = obuNodes.Get(nodeCounter);
       ++nodeCounter; // increment counter for next node
@@ -282,6 +297,7 @@ main (int argc, char *argv[])
   /* Callback function for node shutdown */
   SHUTDOWN_FCN shutdownWifiNode = [] (Ptr<Node> exNode,std::string vehicleID)
     {
+      NS_LOG_INFO("shutdownWifiNode called: vehicleID=" << vehicleID << " nodeId=" << exNode->GetId());
       /* stop all applications */
       Ptr<emergencyVehicleAlert> appSample_ = exNode->GetApplication(0)->GetObject<emergencyVehicleAlert>();
 

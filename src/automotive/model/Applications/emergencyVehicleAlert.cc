@@ -26,6 +26,7 @@
 #include "ns3/socket.h"
 #include "ns3/network-module.h"
 #include "ns3/gn-utils.h"
+#include <fstream>
 
 #define DEG_2_RAD(val) ((val)*M_PI/180.0)
 
@@ -150,6 +151,17 @@ namespace ns3
     Application::DoDispose ();
   }
 
+  /* parche métricas de señal - Redes Vehiculares 2026 */
+  static void logSignalCSV (long tx, long rx, double rssi, double snr)
+  {
+    static std::ofstream f ("signal-rx.csv", std::ios::trunc);
+    static bool hdr = false;
+    if (!hdr) { f << "rx,tx,t_ms,rssi,snr\n"; hdr = true; }
+    f << rx << "," << tx << "," << Simulator::Now ().GetMilliSeconds ()
+      << "," << rssi << "," << snr << "\n";
+  }
+
+
   void
   emergencyVehicleAlert::StartApplication (void)
   {
@@ -259,6 +271,16 @@ namespace ns3
     m_caService.setSocketRx (m_socket);
     m_caService.setStationProperties (std::stol(m_id.substr (3)), (long)stationtype);
     m_caService.addCARxCallback (std::bind(&emergencyVehicleAlert::receiveCAM,this,std::placeholders::_1,std::placeholders::_2));
+   
+    /* parche métricas de señal - Redes Vehiculares 2026 */
+    m_caService.addCARxCallbackExtended (
+      [this] (asn1cpp::Seq<CAM> cam, Address from, StationId_t sid,
+              StationType_t stype, SignalInfo phy)
+      {
+        logSignalCSV (asn1cpp::getField (cam->header.stationId, long),
+                      std::stol (m_id.substr (3)), phy.rssi, phy.snr);
+      });
+
     m_caService.setRealTime (m_real_time);
 
     /* Set sockets, callback, station properties and TraCI VDP in CPBasicService */
@@ -266,6 +288,17 @@ namespace ns3
     m_cpService.setSocketRx (m_socket);
     m_cpService.setStationProperties (std::stol(m_id.substr (3)), (long)stationtype);
     m_cpService.addCPRxCallback (std::bind(&emergencyVehicleAlert::receiveCPM,this,std::placeholders::_1,std::placeholders::_2));
+  
+    /* parche métricas de señal - Redes Vehiculares 2026 */
+    m_cpService.addCPRxCallbackExtended (
+      [this] (asn1cpp::Seq<CollectivePerceptionMessage> cpm, Address from,
+              StationID_t sid, StationType_t stype, SignalInfo phy)
+      {
+        logSignalCSV (asn1cpp::getField (cpm->header.stationId, long),
+                      std::stol (m_id.substr (3)), phy.rssi, phy.snr);
+      });
+  
+  
     m_cpService.setRealTime (m_real_time);
     m_cpService.setTraCIclient (m_client);
 
@@ -598,8 +631,6 @@ namespace ns3
 
         return retval;
   }
-
-
   }
 
 

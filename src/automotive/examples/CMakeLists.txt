@@ -129,6 +129,7 @@ build_lib_example(
         ${libautomotive}
         ${libwave}
         ${libtraci}
+	${libnetanim}
 )
 
 build_lib_example(

@@ -62,7 +62,7 @@
 #include "ns3/packet-socket-helper.h"
 #include "ns3/gn-utils.h"
 #include "ns3/csv-utils.h"
-
+#include "ns3/netanim-module.h"
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE ("V2VSimpleCAMExchange80211p");
@@ -359,6 +359,8 @@ int main (int argc, char *argv[])
 
   // Start simulation, which will last for simTime seconds
   Simulator::Stop (Seconds(simTime));
+  AnimationInterface anim ("v2v-cam-exchange-anim.xml");
+  anim.SetMaxPktsPerTraceFile (500000);
   Simulator::Run ();
 
   // When the simulation is terminated, gather the most relevant metrics from the PRRsupervisor
