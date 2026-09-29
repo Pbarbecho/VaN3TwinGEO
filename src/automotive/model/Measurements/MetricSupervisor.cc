@@ -24,6 +24,7 @@
 #include "ns3/csv-utils.h"
 #include <sstream>
 #include <cfloat>
+#include <cmath>
 
 #define DEG_2_RAD(val) ((val)*M_PI/180.0)
 
@@ -97,10 +98,28 @@ MetricSupervisor::signalSentPacket(std::string buf, double lat, double lon, uint
         }
 
       //std::vector<std::string> ids = m_traci_ptr->TraCIAPI::vehicle.getIDList ();
-      std::map<std::string, std::pair<StationType_t, Ptr<Node>>> node_map =
-          m_traci_ptr->get_NodeMap ();
+      // OJO rendimiento: esto se ejecuta por CADA paquete transmitido. Antes
+      // copiaba el mapa de nodos entero y hacía getPosition + convertXYtoLonLat
+      // por CADA nodo (2·N round-trips TraCI por paquete: con N vehículos a
+      // 10 Hz, 20·N² por segundo). Ahora los vehículos se resuelven con las
+      // instantáneas de la suscripción y la distancia se mide en metros SUMO;
+      // solo peatones y RSU (pocos) siguen consultando TraCI.
+      const std::map<std::string, std::pair<StationType_t, Ptr<Node>>>& node_map =
+          m_traci_ptr->get_NodeMapRef ();
+      // posición (x, y) del emisor para la distancia local: se obtiene UNA vez
+      libsumo::TraCIPosition txXY;
+      bool txXYValid = false;
+      if (m_traci_ptr->UseSubscriptions ())
+        {
+          try
+            {
+              txXY = m_traci_ptr->TraCIAPI::simulation.convertLonLattoXY (lon, lat);
+              txXYValid = true;
+            }
+          catch (const std::exception&) {}
+        }
 
-      for (std::map<std::string, std::pair<StationType_t, Ptr<Node>>>::iterator it =
+      for (std::map<std::string, std::pair<StationType_t, Ptr<Node>>>::const_iterator it =
                node_map.begin ();
            it != node_map.end (); ++it)
         {
@@ -139,6 +158,29 @@ MetricSupervisor::signalSentPacket(std::string buf, double lat, double lon, uint
               continue;
             }
 
+          if (stationID == nodeID)
+            m_stationtype_map[buf] = station_type;
+
+          if (m_excluded_vehID_enabled == true &&
+              (m_excluded_vehID_list.find (stationID) != m_excluded_vehID_list.end ()))
+            {
+              continue;
+            }
+
+          const VehicleSnapshot* snap = (station_type == StationType_pedestrian ||
+                                         station_type == StationType_roadSideUnit)
+                                        ? nullptr : m_traci_ptr->GetSnapshot (it->first);
+          if (snap && txXYValid)
+            {
+              // vehículo con instantánea: distancia euclídea en metros SUMO
+              const double dx = snap->x - txXY.x, dy = snap->y - txXY.y;
+              if (std::sqrt (dx*dx + dy*dy) <= m_baseline_m)
+                {
+                  m_packetbuff_map[buf].nodeList.push_back (stationID);
+                }
+              continue;
+            }
+
           libsumo::TraCIPosition pos;
           if (station_type == StationType_pedestrian)
             {
@@ -162,16 +204,9 @@ MetricSupervisor::signalSentPacket(std::string buf, double lat, double lon, uint
             }
           pos = m_traci_ptr->TraCIAPI::simulation.convertXYtoLonLat (pos.x, pos.y);
 
-          if (stationID == nodeID)
-            m_stationtype_map[buf] = station_type;
-
-          if (m_excluded_vehID_enabled == false ||
-              (m_excluded_vehID_list.find (stationID) == m_excluded_vehID_list.end ()))
+          if (MetricSupervisor_haversineDist (lat, lon, pos.y, pos.x) <= m_baseline_m)
             {
-              if (MetricSupervisor_haversineDist (lat, lon, pos.y, pos.x) <= m_baseline_m)
-                {
-                  m_packetbuff_map[buf].nodeList.push_back (stationID);
-                }
+              m_packetbuff_map[buf].nodeList.push_back (stationID);
             }
         }
     }

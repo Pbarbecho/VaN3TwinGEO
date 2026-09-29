@@ -465,6 +465,12 @@ namespace ns3
       {
         NS_FATAL_ERROR("Error. checkCamConditions() was called before sending any CAM and this is not allowed.");
       }
+    // Las cadenas de depuración de abajo solo se escriben si el log de
+    // disparo está activo; construirlas siempre costaba, por vehículo y cada
+    // 100 ms, DOS getPosition() extra (cada uno 2 round-trips TraCI) y varios
+    // std::to_string. Con cientos de vehículos era la mayor parte del tráfico
+    // TraCI de la corrida.
+    const bool logging = (m_log_triggering && m_log_filename != "");
     /*
      * ETSI EN 302 637-2 V1.3.1 chap. 6.1.3 condition 1) (no DCC)
      * One of the following ITS-S dynamics related conditions is given:
@@ -477,7 +483,8 @@ namespace ns3
     */
     double head_diff = m_vdp->getHeadingValue () - m_prev_heading;
     head_diff += (head_diff>180.0) ? -360.0 : (head_diff<-180.0) ? 360.0 : 0.0;
-    data_head="[HEADING] HeadingUnavailable="+std::to_string((float)HeadingValue_unavailable/10)+" PrevHead="+std::to_string(m_prev_heading/10)+" CurrHead="+std::to_string(m_vdp->getHeadingValue ())+" HeadDiff="+std::to_string(head_diff)+"\n";
+    if (logging)
+      data_head="[HEADING] HeadingUnavailable="+std::to_string((float)HeadingValue_unavailable/10)+" PrevHead="+std::to_string(m_prev_heading/10)+" CurrHead="+std::to_string(m_vdp->getHeadingValue ())+" HeadDiff="+std::to_string(head_diff)+"\n";
     if (head_diff > 4.0 || head_diff < -4.0)
       {
         if (m_T_next_dcc == -1 || now - lastCamGen >= m_T_next_dcc)
@@ -505,7 +512,11 @@ namespace ns3
      * ITS-S exceeds 4 m;
     */
     double pos_diff = m_vdp->getTravelledDistance () - m_prev_distance;
-    data_pos="[DISTANCE] PrevLat="+std::to_string(m_prev_position.lat)+" PrevLon="+std::to_string(m_prev_position.lon)+" CurrLat="+std::to_string(m_vdp->getPosition().lat)+" CurrLon="+std::to_string(m_vdp->getPosition().lon)+" PosDiff="+std::to_string(pos_diff)+"\n";
+    if (logging)
+      {
+        VDP::VDP_position_latlon_t cur_pos = m_vdp->getPosition();
+        data_pos="[DISTANCE] PrevLat="+std::to_string(m_prev_position.lat)+" PrevLon="+std::to_string(m_prev_position.lon)+" CurrLat="+std::to_string(cur_pos.lat)+" CurrLon="+std::to_string(cur_pos.lon)+" PosDiff="+std::to_string(pos_diff)+"\n";
+      }
     if (!condition_verified && (pos_diff > 4.0 || pos_diff < -4.0))
       {
         if (m_T_next_dcc == -1 || now - lastCamGen >= m_T_next_dcc)
@@ -532,7 +543,8 @@ namespace ns3
      * ITS-S exceeds 0,5 m/s.
     */
     double speed_diff = m_vdp->getSpeedValue () - m_prev_speed;
-    data_speed="[SPEED] SpeedUnavailable="+std::to_string((float)SpeedValue_unavailable)+" PrevSpeed="+std::to_string(m_prev_speed)+" CurrSpeed="+std::to_string(m_vdp->getSpeedValue ())+" SpeedDiff="+std::to_string(speed_diff)+"\n";
+    if (logging)
+      data_speed="[SPEED] SpeedUnavailable="+std::to_string((float)SpeedValue_unavailable)+" PrevSpeed="+std::to_string(m_prev_speed)+" CurrSpeed="+std::to_string(m_vdp->getSpeedValue ())+" SpeedDiff="+std::to_string(speed_diff)+"\n";
     if (!condition_verified && (speed_diff > 0.5 || speed_diff < -0.5))
       {
         if (m_T_next_dcc == -1 || now - lastCamGen >= m_T_next_dcc)
@@ -557,7 +569,8 @@ namespace ns3
      * The time elapsed since the last CAM generation is equal to or greater than T_GenCam
     */
     long time_difference = now - lastCamGen;
-    data_time="[TIME] Timestamp="+std::to_string(now)+" LastCAMSend="+std::to_string(lastCamGen)+" NumThreshold="+std::to_string(m_N_GenCamMax)+" NumCAM="+std::to_string(m_N_GenCam)+" TimeThreshold="+std::to_string(m_T_GenCam_ms)+" TimeDiff="+std::to_string(time_difference)+" TimeNextCAM="+std::to_string(m_T_GenCam_ms - time_difference)+"\n";
+    if (logging)
+      data_time="[TIME] Timestamp="+std::to_string(now)+" LastCAMSend="+std::to_string(lastCamGen)+" NumThreshold="+std::to_string(m_N_GenCamMax)+" NumCAM="+std::to_string(m_N_GenCam)+" TimeThreshold="+std::to_string(m_T_GenCam_ms)+" TimeDiff="+std::to_string(time_difference)+" TimeNextCAM="+std::to_string(m_T_GenCam_ms - time_difference)+"\n";
     if(!condition_verified && (now-lastCamGen>=m_T_GenCam_ms))
       {
         if (m_T_next_dcc == -1 || now - lastCamGen >= m_T_next_dcc)

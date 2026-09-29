@@ -119,9 +119,165 @@ namespace ns3
                   "Name of the network namespace to be used to launch SUMO",
                    StringValue (""),
                    MakeStringAccessor (&TraciClient::m_netns_name),
-                   MakeStringChecker ());
+                   MakeStringChecker ())
+    .AddAttribute ("UseSubscriptions",
+                  "Read vehicle state (position, speed, heading, ...) through TraCI "
+                  "subscriptions delivered with each simulationStep instead of one "
+                  "socket round-trip per vehicle and variable (see VehicleSnapshot).",
+                  BooleanValue (true),
+                  MakeBooleanAccessor (&TraciClient::m_useSubscriptions),
+                  MakeBooleanChecker ());
   ;
     return tid;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Instantáneas por suscripción (rendimiento con cientos de vehículos)
+  // ---------------------------------------------------------------------------
+  void
+  TraciClient::SubscribeVehicle (const std::string& vehId)
+  {
+    if (!m_useSubscriptions)
+      {
+        return;
+      }
+    try
+      {
+        std::vector<int> vars = {VAR_POSITION, VAR_SPEED, VAR_ANGLE, VAR_ACCELERATION,
+                                 VAR_DISTANCE, VAR_ROAD_ID, VAR_LANE_INDEX};
+        this->TraCIAPI::vehicle.subscribe (vehId, vars, INVALID_DOUBLE_VALUE, INVALID_DOUBLE_VALUE);
+      }
+    catch (std::exception& e)
+      {
+        // SUMO sin soporte para alguna variable: seguir con consultas directas
+        NS_LOG_WARN ("TraciClient: subscription failed for " << vehId << " (" << e.what ()
+                     << "); falling back to per-vehicle queries");
+        m_useSubscriptions = false;
+        m_snapshots.clear ();
+      }
+  }
+
+  void
+  TraciClient::RefreshSnapshots ()
+  {
+    if (!m_useSubscriptions)
+      {
+        return;
+      }
+    const int64_t now = Simulator::Now ().GetNanoSeconds ();
+    const libsumo::SubscriptionResults& res = this->TraCIAPI::vehicle.getAllSubscriptionResults ();
+    for (const auto& item : res)
+      {
+        VehicleSnapshot& s = m_snapshots[item.first];
+        const libsumo::TraCIResults& r = item.second;
+        auto it = r.find (VAR_POSITION);
+        if (it != r.end ())
+          {
+            auto p = std::dynamic_pointer_cast<libsumo::TraCIPosition> (it->second);
+            if (p) { s.x = p->x; s.y = p->y; }
+          }
+        if ((it = r.find (VAR_SPEED)) != r.end ())
+          {
+            auto d = std::dynamic_pointer_cast<libsumo::TraCIDouble> (it->second);
+            if (d) s.speed = d->value;
+          }
+        if ((it = r.find (VAR_ANGLE)) != r.end ())
+          {
+            auto d = std::dynamic_pointer_cast<libsumo::TraCIDouble> (it->second);
+            if (d) s.angle = d->value;
+          }
+        if ((it = r.find (VAR_ACCELERATION)) != r.end ())
+          {
+            auto d = std::dynamic_pointer_cast<libsumo::TraCIDouble> (it->second);
+            if (d) s.accel = d->value;
+          }
+        if ((it = r.find (VAR_DISTANCE)) != r.end ())
+          {
+            auto d = std::dynamic_pointer_cast<libsumo::TraCIDouble> (it->second);
+            if (d) s.distance = d->value;
+          }
+        if ((it = r.find (VAR_ROAD_ID)) != r.end ())
+          {
+            auto str = std::dynamic_pointer_cast<libsumo::TraCIString> (it->second);
+            if (str) s.roadId = str->value;
+          }
+        if ((it = r.find (VAR_LANE_INDEX)) != r.end ())
+          {
+            auto i = std::dynamic_pointer_cast<libsumo::TraCIInt> (it->second);
+            if (i) s.laneIndex = i->value;
+          }
+        s.geoValid = false;             // lon/lat se convierten solo si se piden
+        s.stamp = now;
+      }
+    // vehículos que ya no están en SUMO: fuera de la tabla
+    for (auto it = m_snapshots.begin (); it != m_snapshots.end ();)
+      {
+        if (it->second.stamp != now)
+          {
+            it = m_snapshots.erase (it);
+          }
+        else
+          {
+            ++it;
+          }
+      }
+  }
+
+  const VehicleSnapshot*
+  TraciClient::GetSnapshot (const std::string& vehId)
+  {
+    if (!m_useSubscriptions)
+      {
+        return nullptr;
+      }
+    auto it = m_snapshots.find (vehId);
+    return it == m_snapshots.end () ? nullptr : &it->second;
+  }
+
+  const VehicleSnapshot*
+  TraciClient::GetSnapshotGeo (const std::string& vehId)
+  {
+    auto it = m_snapshots.find (vehId);
+    if (!m_useSubscriptions || it == m_snapshots.end ())
+      {
+        return nullptr;
+      }
+    VehicleSnapshot& s = it->second;
+    if (!s.geoValid)
+      {
+        libsumo::TraCIPosition ll = this->TraCIAPI::simulation.convertXYtoLonLat (s.x, s.y);
+        s.lon = ll.x;
+        s.lat = ll.y;
+        s.geoValid = true;
+      }
+    return &s;
+  }
+
+  int
+  TraciClient::GetEdgeLaneNumber (const std::string& edgeId)
+  {
+    auto it = m_edgeLanes.find (edgeId);
+    if (it != m_edgeLanes.end ())
+      {
+        return it->second;
+      }
+    int n = this->TraCIAPI::edge.getLaneNumber (edgeId);
+    m_edgeLanes[edgeId] = n;
+    return n;
+  }
+
+  std::pair<double, double>
+  TraciClient::GetVehicleDims (const std::string& vehId)
+  {
+    auto it = m_vehDims.find (vehId);
+    if (it != m_vehDims.end ())
+      {
+        return it->second;
+      }
+    std::pair<double, double> d (this->TraCIAPI::vehicle.getLength (vehId),
+                                 this->TraCIAPI::vehicle.getWidth (vehId));
+    m_vehDims[vehId] = d;
+    return d;
   }
 
   TraciClient::TraciClient(void)
@@ -327,6 +483,33 @@ namespace ns3
     // synchronise sumo vehicles with ns3 nodes
     SynchroniseNodeMap();
 
+    // Vehículos que ya estaban en la simulación al conectar (StartTime > 0 o
+    // salidas en t=0 no reportadas como "departed"): suscribirlos también.
+    if (m_useSubscriptions)
+      {
+        const int64_t now = Simulator::Now ().GetNanoSeconds ();
+        for (const std::string& veh : this->TraCIAPI::vehicle.getIDList ())
+          {
+            if (m_snapshots.find (veh) != m_snapshots.end ())
+              {
+                continue;
+              }
+            SubscribeVehicle (veh);
+            try
+              {
+                libsumo::TraCIPosition vpos = this->TraCIAPI::vehicle.getPosition (veh);
+                VehicleSnapshot& s = m_snapshots[veh];
+                s.x = vpos.x; s.y = vpos.y;
+                s.speed = this->TraCIAPI::vehicle.getSpeed (veh);
+                s.angle = this->TraCIAPI::vehicle.getAngle (veh);
+                s.roadId = this->TraCIAPI::vehicle.getRoadID (veh);
+                s.geoValid = false;
+                s.stamp = now;
+              }
+            catch (std::exception& e) {}
+          }
+      }
+
     // get current positions from sumo and uptdate positions
     UpdatePositions();
 
@@ -346,6 +529,10 @@ namespace ns3
 
         // command sumo to simulate next time step
         this->TraCIAPI::simulationStep(nextTime);
+
+        // los resultados de suscripción de TODA la flota llegaron con la
+        // respuesta anterior: volcarlos en las instantáneas (0 round-trips)
+        RefreshSnapshots();
 
         // include a ns3 node for every new sumo vehicle/pedestrian and exclude arrived vehicles/pedestrians
         SynchroniseNodeMap();
@@ -378,10 +565,16 @@ namespace ns3
 
             // get vehicle/pedestrian position from sumo
             libsumo::TraCIPosition pos;
+            const VehicleSnapshot* snap = nullptr;
             if(it->second.first == StationType_pedestrian)
                pos = this->TraCIAPI::person.getPosition(node_ID);
             else if (it->second.first == StationType_roadSideUnit)
               continue;
+            else if ((snap = GetSnapshot (node_ID)) != nullptr)
+              {
+                // instantánea de la suscripción: sin round-trip
+                pos.x = snap->x; pos.y = snap->y; pos.z = 0.0;
+              }
             else
                pos = this->TraCIAPI::vehicle.getPosition(node_ID);
 
@@ -393,8 +586,8 @@ namespace ns3
             if (m_sionna == true)
             {
               Vector pos_for_sionna = Vector(pos.x, pos.y, m_altitude);
-              double angle_for_sionna = this->TraCIAPI::vehicle.getAngle(node_ID);
-              double speed = this->TraCIAPI::vehicle.getSpeed(node_ID);
+              double angle_for_sionna = snap ? snap->angle : this->TraCIAPI::vehicle.getAngle(node_ID);
+              double speed = snap ? snap->speed : this->TraCIAPI::vehicle.getSpeed(node_ID);
               Vector vel_for_sionna = Vector(speed * cos(angle_for_sionna), speed * sin(angle_for_sionna), 0.0);
               updateLocationInSionna(node_ID, pos_for_sionna, angle_for_sionna, vel_for_sionna);
             }
@@ -402,7 +595,7 @@ namespace ns3
             if (m_vehicle_visualizer!=nullptr && m_vehicle_visualizer->isConnected() && it->second.first != StationType_pedestrian)
             {
                 libsumo::TraCIPosition lonlat = this->TraCIAPI::simulation.convertXYtoLonLat (pos.x,pos.y);
-                int rval = m_vehicle_visualizer->sendObjectUpdate (node_ID,lonlat.y,lonlat.x,this->TraCIAPI::vehicle.getAngle (node_ID));
+                int rval = m_vehicle_visualizer->sendObjectUpdate (node_ID,lonlat.y,lonlat.x,snap ? snap->angle : this->TraCIAPI::vehicle.getAngle (node_ID));
                 if (rval<0)
                 {
                     NS_FATAL_ERROR("Error: cannot send the object update to the vehicle visualizer for vehicle: "<<node_ID);
@@ -452,6 +645,28 @@ namespace ns3
               }
             else
               {
+                // Suscribir el estado de TODOS los vehículos de SUMO (también
+                // los no equipados, que el sensor SUMO debe poder "ver"), antes
+                // de crear el nodo: las apps (VDP, sensor) leen la instantánea
+                // desde su StartApplication. La suscripción empieza a servir
+                // datos en el siguiente simulationStep: la primera instantánea
+                // se rellena con una lectura directa.
+                SubscribeVehicle(veh);
+                if (m_useSubscriptions)
+                  {
+                    try
+                      {
+                        libsumo::TraCIPosition vpos = this->TraCIAPI::vehicle.getPosition (veh);
+                        VehicleSnapshot& s = m_snapshots[veh];
+                        s.x = vpos.x; s.y = vpos.y;
+                        s.speed = this->TraCIAPI::vehicle.getSpeed (veh);
+                        s.angle = this->TraCIAPI::vehicle.getAngle (veh);
+                        s.roadId = this->TraCIAPI::vehicle.getRoadID (veh);
+                        s.geoValid = false;
+                        s.stamp = Simulator::Now ().GetNanoSeconds ();
+                      }
+                    catch (std::exception& e) {}
+                  }
                 // penetration rate determines number of included nodes
                 if (randVar->GetValue() <= m_penetrationRate)
                   {
@@ -514,9 +729,14 @@ namespace ns3
 
                 // unregister in map
                 m_NodeMap.erase(veh);
+                m_snapshots.erase(veh);
+                m_vehDims.erase(veh);
               }
             else // if it is not in the map, create a new ns3 node for it
               {
+                // (la suscripción del vehículo ya se hizo en GetSumoVehicles,
+                // para TODOS los vehículos de SUMO, equipados o no)
+
                 // create new node by calling the include function
                 std::pair<StationType_t, Ptr<ns3::Node>> inNode;
                 inNode.first = StationType_passengerCar;

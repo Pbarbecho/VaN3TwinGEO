@@ -69,6 +69,12 @@ main (int argc, char *argv[])
 
   float datarate=12;  
   bool vehicle_vis = false;
+  // pcap por nodo (v2v-EVA-<n>-0.pcap). Cada nodo graba TODO lo que oye, así
+  // que el volumen total crece con N²: con cientos de vehículos son cientos de
+  // MB por minuto simulado y ralentizan ns-3. --pcap=false los desactiva (el
+  // visor SUMO-GEO sigue mostrando la movilidad; los mensajes V2X en vivo y
+  // el replay necesitan los pcap).
+  bool pcap = true;
 
   // Disabling this option turns off the whole V2X application (useful for comparing the situation when the application is enabled and the one in which it is disabled)
   bool send_cam = true;
@@ -95,6 +101,7 @@ main (int argc, char *argv[])
   cmd.AddValue ("sumo-config", "Location and name of SUMO configuration file", sumo_config);
   cmd.AddValue ("csv-log", "Name of the CSV log file", csv_name);
   cmd.AddValue ("vehicle-visualizer", "Activate the web-based vehicle visualizer for ms-van3t", vehicle_vis);
+  cmd.AddValue ("pcap", "Write one pcap per node (v2v-EVA-<n>-0.pcap); disable for large fleets", pcap);
   cmd.AddValue ("send-cam", "Turn on or off the transmission of CAMs, thus turning on or off the whole V2X application",send_cam);
   cmd.AddValue ("csv-log-cumulative", "Name of the CSV log file for the cumulative (average) PRR and latency data", csv_name_cumulative);
   cmd.AddValue ("netstate-dump-file", "Name of the SUMO netstate-dump file containing the vehicle-related information throughout the whole simulation", sumo_netstate_file_name);
@@ -199,7 +206,10 @@ main (int argc, char *argv[])
                                       "NonUnicastMode",StringValue (datarate_config));
   NetDeviceContainer netDevices = wifi80211p.Install (wifiPhy, wifi80211pMac, obuNodes);
 
-  wifiPhy.EnablePcap ("v2v-EVA",netDevices);
+  if (pcap)
+    {
+      wifiPhy.EnablePcap ("v2v-EVA",netDevices);
+    }
 
   /*** 4. Give packet socket powers to nodes (otherwise, if the app tries to create a PacketSocket, CreateSocket will end up with a segmentation fault */
   PacketSocketHelper packetSocket;

@@ -50,27 +50,54 @@ namespace ns3 {
   SUMOSensor::updateDetectedObjects ()
   {
     using namespace boost::geometry::strategy::transform;
-    libsumo::TraCIPosition egoPosXY=m_client->TraCIAPI::vehicle.getPosition(m_id);
-    libsumo::TraCIPosition egoPos = m_client->TraCIAPI::simulation.convertXYtoLonLat (egoPosXY.x,egoPosXY.y);
-    std::vector<std::string> allIDs;
+    libsumo::TraCIPosition egoPosXY;
     std::vector<std::pair<std::string,double>> rangeIDs,sensedIDs;
-    // Get all IDs in the simulation
-    allIDs = m_client->vehicle.getIDList ();
 
-    for(size_t i=0;i<allIDs.size ();i++)
+    // Candidatos en alcance. Antes: getIDList() + getPosition() +
+    // convertXYtoLonLat() por CADA vehículo de la simulación, para CADA sensor,
+    // cada 100 ms -> 2·N² round-trips TraCI por segundo (con 100 vehículos,
+    // ~200 000/s: inviable). Ahora la distancia se calcula en metros SUMO
+    // (x, y) sobre las instantáneas de la suscripción, sin ningún round-trip.
+    // Para el filtro de alcance (<= 50 m) la métrica euclídea local es
+    // equivalente a la haversine sobre lon/lat.
+    const VehicleSnapshot* ego = m_client->GetSnapshot (m_id);
+    if (ego)
       {
-        //For all IDs, except the egoID
-        if(allIDs[i].compare(m_id))
+        egoPosXY.x = ego->x; egoPosXY.y = ego->y; egoPosXY.z = 0.0;
+        const double r2 = m_sensorRange * m_sensorRange;
+        for (const auto& it : m_client->GetSnapshots ())
           {
-            //Compute the vehicle distance from the egoVehicle's front bumper
-            double f;
-            libsumo::TraCIPosition geoPos=m_client->TraCIAPI::vehicle.getPosition(allIDs[i]);
-            geoPos=m_client->TraCIAPI::simulation.convertXYtoLonLat (geoPos.x,geoPos.y);
-            f = compute_sensordist (egoPos.y,egoPos.x,geoPos.y,geoPos.x);
-            if (f<=m_sensorRange)
+            if (it.first == m_id)
+              continue;
+            const double dx = it.second.x - ego->x, dy = it.second.y - ego->y;
+            const double d2 = dx*dx + dy*dy;
+            if (d2 <= r2)
               {
-                //If the vehicle is closer than the sensor range, add to preliminary in range list
-                rangeIDs.push_back (std::pair<std::string,double>(allIDs[i],f));
+                rangeIDs.push_back (std::pair<std::string,double>(it.first, std::sqrt (d2)));
+              }
+          }
+      }
+    else
+      {
+        // sin suscripciones (UseSubscriptions=false): camino original
+        egoPosXY=m_client->TraCIAPI::vehicle.getPosition(m_id);
+        libsumo::TraCIPosition egoPos = m_client->TraCIAPI::simulation.convertXYtoLonLat (egoPosXY.x,egoPosXY.y);
+        std::vector<std::string> allIDs = m_client->vehicle.getIDList ();
+        for(size_t i=0;i<allIDs.size ();i++)
+          {
+            //For all IDs, except the egoID
+            if(allIDs[i].compare(m_id))
+              {
+                //Compute the vehicle distance from the egoVehicle's front bumper
+                double f;
+                libsumo::TraCIPosition geoPos=m_client->TraCIAPI::vehicle.getPosition(allIDs[i]);
+                geoPos=m_client->TraCIAPI::simulation.convertXYtoLonLat (geoPos.x,geoPos.y);
+                f = compute_sensordist (egoPos.y,egoPos.x,geoPos.y,geoPos.x);
+                if (f<=m_sensorRange)
+                  {
+                    //If the vehicle is closer than the sensor range, add to preliminary in range list
+                    rangeIDs.push_back (std::pair<std::string,double>(allIDs[i],f));
+                  }
               }
           }
       }
@@ -150,28 +177,55 @@ namespace ns3 {
               objectData.ID = sensedIDs[i].first;
               objectData.stationID = std::stol(objectData.ID.substr(3));
 
+              // estado del objeto detectado y del ego: instantáneas (0
+              // round-trips) o consultas directas si no hay suscripción
+              const VehicleSnapshot* obj = m_client->GetSnapshot (objectData.ID);
+              libsumo::TraCIPosition objectPosition;
+              double objAngle, objSpeed, objAccel, egoAngle, egoSpeed;
+              std::pair<double, double> objDims = m_client->GetVehicleDims (objectData.ID);
+              if (obj)
+                {
+                  objectPosition.x = obj->x; objectPosition.y = obj->y; objectPosition.z = 0.0;
+                  objAngle = obj->angle; objSpeed = obj->speed; objAccel = obj->accel;
+                }
+              else
+                {
+                  objectPosition = m_client->TraCIAPI::vehicle.getPosition(objectData.ID);
+                  objAngle = m_client->vehicle.getAngle (objectData.ID);
+                  objSpeed = m_client->vehicle.getSpeed (objectData.ID);
+                  objAccel = m_client->vehicle.getAcceleration (objectData.ID);
+                }
+              if (ego)
+                {
+                  egoAngle = ego->angle; egoSpeed = ego->speed;
+                }
+              else
+                {
+                  egoAngle = m_client->vehicle.getAngle (m_id);
+                  egoSpeed = m_client->vehicle.getSpeed (m_id);
+                }
+
               //Get position with noise
-              libsumo::TraCIPosition objectPosition = m_client->TraCIAPI::vehicle.getPosition(objectData.ID);
               objectPosition.x += (dist_distance(m_generator)*dist_factor);
-              objectPosition.y += (dist_distance(m_generator)*dist_factor);            
+              objectPosition.y += (dist_distance(m_generator)*dist_factor);
 
-
-              objectData.lon = m_client->TraCIAPI::simulation.convertXYtoLonLat (objectPosition.x
-                                                                                 ,objectPosition.y).x;
-              objectData.lat = m_client->TraCIAPI::simulation.convertXYtoLonLat (objectPosition.x
-                                                                                 ,objectPosition.y).y;
+              // UNA conversión a lon/lat por objeto detectado (antes dos)
+              libsumo::TraCIPosition objectLonLat = m_client->TraCIAPI::simulation.convertXYtoLonLat (objectPosition.x
+                                                                                                       ,objectPosition.y);
+              objectData.lon = objectLonLat.x;
+              objectData.lat = objectLonLat.y;
               objectData.elevation = AltitudeValue_unavailable;
-              objectData.heading = m_client->vehicle.getAngle (objectData.ID)+(dist_angle(m_generator)*dist_factor);
-              objectData.speed_ms = m_client->vehicle.getSpeed (objectData.ID)+(dist_speed(m_generator)*dist_factor);
+              objectData.heading = objAngle+(dist_angle(m_generator)*dist_factor);
+              objectData.speed_ms = objSpeed+(dist_speed(m_generator)*dist_factor);
               objectData.timestamp_us = Simulator::Now ().GetMicroSeconds ();
               objectData.camTimestamp = objectData.timestamp_us;
-              objectData.vehicleWidth = OptionalDataItem<long>(long ((m_client->vehicle.getWidth(objectData.ID)+(dist_distance(m_generator)*dist_factor/10))*DECI));
-              objectData.vehicleLength = OptionalDataItem<long>(long ((m_client->vehicle.getLength(objectData.ID)+(dist_distance(m_generator)*dist_factor/10))*DECI));
+              objectData.vehicleWidth = OptionalDataItem<long>(long ((objDims.second+(dist_distance(m_generator)*dist_factor/10))*DECI));
+              objectData.vehicleLength = OptionalDataItem<long>(long ((objDims.first+(dist_distance(m_generator)*dist_factor/10))*DECI));
               //Compute relative distance with x axis being defined by the egoVehicle's angle
-              libsumo::TraCIPosition egoPosition = m_client->TraCIAPI::vehicle.getPosition(m_id);
+              libsumo::TraCIPosition egoPosition = egoPosXY;
               point_type egoReference(egoPosition.x,egoPosition.y);
               point_type relReference(objectPosition.x,objectPosition.y);
-              rotate_transformer<boost::geometry::degree, double, 2, 2> rotate(90-m_client->vehicle.getAngle (m_id));
+              rotate_transformer<boost::geometry::degree, double, 2, 2> rotate(90-egoAngle);
 
               boost::geometry::transform(egoReference, egoReference, rotate);// Transform both points to the SUMO (x,y) axises
               boost::geometry::transform(relReference, relReference, rotate);
@@ -183,26 +237,26 @@ namespace ns3 {
               objectData.xDistAbs = OptionalDataItem<long>(long (objectPosition.x - egoPosition.x)*CENTI);
               objectData.yDistAbs = OptionalDataItem<long>(long (objectPosition.y - egoPosition.y)*CENTI);
               //Compute relative speed with x axis being defined by the egoVehicle's angle
-              point_type egoSpeed(m_client->vehicle.getSpeed (m_id),0);
+              point_type egoSpeedPt(egoSpeed,0);
               point_type relSpeed(objectData.speed_ms,0);
-              rotate_transformer<boost::geometry::degree, double, 2, 2> rotate_speed(90-m_client->vehicle.getAngle (m_id));
-              boost::geometry::transform(egoSpeed, egoSpeed, rotate_speed);
+              rotate_transformer<boost::geometry::degree, double, 2, 2> rotate_speed(90-egoAngle);
+              boost::geometry::transform(egoSpeedPt, egoSpeedPt, rotate_speed);
               boost::geometry::transform(relSpeed, relSpeed, rotate_speed);
 
-              double xspeed = (boost::geometry::get<0>(relSpeed)-boost::geometry::get<0>(egoSpeed))*CENTI;
-              double yspeed = (boost::geometry::get<1>(relSpeed)-boost::geometry::get<1>(egoSpeed))*CENTI;
+              double xspeed = (boost::geometry::get<0>(relSpeed)-boost::geometry::get<0>(egoSpeedPt))*CENTI;
+              double yspeed = (boost::geometry::get<1>(relSpeed)-boost::geometry::get<1>(egoSpeedPt))*CENTI;
 
               objectData.xSpeed = OptionalDataItem <long>((long) xspeed);
               objectData.ySpeed = OptionalDataItem <long>((long) yspeed);
               objectData.xSpeedAbs = OptionalDataItem <long>((long) (objectData.speed_ms * cos(DEG_2_RAD(objectData.heading)))*CENTI);
               objectData.ySpeedAbs = OptionalDataItem <long>((long) (objectData.speed_ms * sin(DEG_2_RAD(objectData.heading)))*CENTI);
 
-              objectData.longitudinalAcceleration = OptionalDataItem <long> (long (m_client->vehicle.getAcceleration (objectData.ID)));
-              objectData.xAccAbs = OptionalDataItem <long> (long (m_client->vehicle.getAcceleration (objectData.ID) * cos(DEG_2_RAD(objectData.heading))));
-              objectData.yAccAbs = OptionalDataItem <long> (long (m_client->vehicle.getAcceleration (objectData.ID) * sin(DEG_2_RAD(objectData.heading))));
+              objectData.longitudinalAcceleration = OptionalDataItem <long> (long (objAccel));
+              objectData.xAccAbs = OptionalDataItem <long> (long (objAccel * cos(DEG_2_RAD(objectData.heading))));
+              objectData.yAccAbs = OptionalDataItem <long> (long (objAccel * sin(DEG_2_RAD(objectData.heading))));
               objectData.confidence = long (dist_factor*CENTI); //Distance based confidence
               objectData.perceivedBy = OptionalDataItem<long> ((long) m_stationID);
-              long relAngle = (long) ((objectData.heading + dist_angle(m_generator) - m_client->vehicle.getAngle(m_id))*DECI);
+              long relAngle = (long) ((objectData.heading + dist_angle(m_generator) - egoAngle)*DECI);
               if(relAngle<0)
                 objectData.angle = OptionalDataItem <long> (relAngle+3600);//Relative 'negative' Heading angle
               else
@@ -231,13 +285,26 @@ namespace ns3 {
   SUMOSensor::adjust(std::string id)
   {
     using namespace boost::geometry::strategy::transform;
-    libsumo::TraCIPosition egoPos=m_client->TraCIAPI::vehicle.getPosition(id);
-    double width,length;
+    libsumo::TraCIPosition egoPos;
+    double width,length,angle;
     vehiclePoints_t points;
 
-    auto angle = m_client->vehicle.getAngle (id);
-    width = m_client->vehicle.getWidth (id);
-    length = m_client->vehicle.getLength (id);
+    // instantánea + dimensiones cacheadas: antes 4 round-trips por vehículo
+    // en alcance y por comprobación de línea de visión
+    const VehicleSnapshot* s = m_client->GetSnapshot (id);
+    if (s)
+      {
+        egoPos.x = s->x; egoPos.y = s->y; egoPos.z = 0.0;
+        angle = s->angle;
+      }
+    else
+      {
+        egoPos=m_client->TraCIAPI::vehicle.getPosition(id);
+        angle = m_client->vehicle.getAngle (id);
+      }
+    std::pair<double, double> dims = m_client->GetVehicleDims (id);
+    length = dims.first;
+    width = dims.second;
     angle = -1.0 * (angle-90);
 
 

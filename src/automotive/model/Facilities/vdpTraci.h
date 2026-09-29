@@ -78,17 +78,28 @@ namespace ns3 {
      * @brief This functio returns the vehicle's speed.
      * @return
      */
-    double getSpeedValue() {return m_traci_client->TraCIAPI::vehicle.getSpeed (m_id);}
+    // Los getters leen la instantánea por suscripción del TraciClient
+    // (VehicleSnapshot, 0 round-trips); si no hay, consulta directa como antes.
+    double getSpeedValue() {
+      const VehicleSnapshot* s = m_traci_client->GetSnapshot (m_id);
+      return s ? s->speed : m_traci_client->TraCIAPI::vehicle.getSpeed (m_id);
+    }
     /**
      * @brief This function returns the vehicle's travelled distance.
      * @return
      */
-    double getTravelledDistance() {return m_traci_client->TraCIAPI::vehicle.getDistance (m_id);}
+    double getTravelledDistance() {
+      const VehicleSnapshot* s = m_traci_client->GetSnapshot (m_id);
+      return s ? s->distance : m_traci_client->TraCIAPI::vehicle.getDistance (m_id);
+    }
     /**
      * @brief This function returns the vehicle's heading.
      * @return
      */
-    double getHeadingValue() {return m_traci_client->TraCIAPI::vehicle.getAngle (m_id);}
+    double getHeadingValue() {
+      const VehicleSnapshot* s = m_traci_client->GetSnapshot (m_id);
+      return s ? s->angle : m_traci_client->TraCIAPI::vehicle.getAngle (m_id);
+    }
 
     // Added for GeoNet functionalities
     /**
@@ -157,6 +168,11 @@ namespace ns3 {
     void setSafetyCarContainerData(VDP_SafetyCarContainerData_t data) {m_safetyCarContainerData = VDPDataItem<VDP_SafetyCarContainerData_t>(data);}
 
     private:
+    // cinemática (velocidad, lon, lat, aceleración, rumbo) desde la
+    // instantánea del TraciClient o, si no la hay, por consultas directas
+    bool readKinematics (double& speed, double& lon, double& lat, double& accel, double& heading);
+    // carril en convención ETSI (1 = el de más a la izquierda)
+    int readLanePosition ();
       std::string m_id;
       Ptr<TraciClient> m_traci_client;
       bool m_isStatic;

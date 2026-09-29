@@ -135,6 +135,18 @@ namespace ns3
   {
     VDP_position_latlon_t vdppos;
 
+    // instantánea por suscripción: lon/lat convertidas UNA vez por paso de
+    // sincronización y compartidas por CAM/CPM/DENM/sensor (antes: 2
+    // round-trips por llamada, y checkCamConditions llamaba varias veces)
+    const VehicleSnapshot* s = m_isStatic ? nullptr : m_traci_client->GetSnapshotGeo (m_id);
+    if (s)
+      {
+        vdppos.lat=s->lat;
+        vdppos.lon=s->lon;
+        vdppos.alt=DBL_MAX;
+        return vdppos;
+      }
+
     libsumo::TraCIPosition pos;
     if (!m_isStatic)
       pos=m_traci_client->TraCIAPI::vehicle.getPosition(m_id);
@@ -155,6 +167,15 @@ namespace ns3
   {
     VDP_position_cartesian_t vdppos;
 
+    const VehicleSnapshot* s = m_isStatic ? nullptr : m_traci_client->GetSnapshot (m_id);
+    if (s)
+      {
+        vdppos.x=s->x;
+        vdppos.y=s->y;
+        vdppos.z=0.0;
+        return vdppos;
+      }
+
     libsumo::TraCIPosition pos;
     if (!m_isStatic)
       pos=m_traci_client->TraCIAPI::vehicle.getPosition(m_id);
@@ -166,6 +187,56 @@ namespace ns3
     vdppos.z=pos.z;
 
     return vdppos;
+  }
+
+  // Datos cinemáticos comunes a CAM/CPM/MCM desde la instantánea (o, si no
+  // hay, con las consultas directas originales). Devuelve false si el
+  // vehículo es estático (RSU/POI): el llamante rellena solo la posición.
+  bool
+  VDPTraCI::readKinematics (double& speed, double& lon, double& lat, double& accel, double& heading)
+  {
+    if (m_isStatic)
+      {
+        libsumo::TraCIPosition pos = m_traci_client->TraCIAPI::poi.getPosition(m_id);
+        pos = m_traci_client->TraCIAPI::simulation.convertXYtoLonLat (pos.x,pos.y);
+        lon = pos.x; lat = pos.y;
+        speed = accel = heading = 0.0;
+        return false;
+      }
+    const VehicleSnapshot* s = m_traci_client->GetSnapshotGeo (m_id);
+    if (s)
+      {
+        speed = s->speed; lon = s->lon; lat = s->lat; accel = s->accel; heading = s->angle;
+        return true;
+      }
+    speed = m_traci_client->TraCIAPI::vehicle.getSpeed (m_id);
+    libsumo::TraCIPosition pos = m_traci_client->TraCIAPI::vehicle.getPosition(m_id);
+    pos = m_traci_client->TraCIAPI::simulation.convertXYtoLonLat (pos.x,pos.y);
+    lon = pos.x; lat = pos.y;
+    accel = m_traci_client->TraCIAPI::vehicle.getAcceleration (m_id);
+    heading = m_traci_client->TraCIAPI::vehicle.getAngle (m_id);
+    return true;
+  }
+
+  int
+  VDPTraCI::readLanePosition ()
+  {
+    const VehicleSnapshot* s = m_traci_client->GetSnapshot (m_id);
+    int lanes, current_lane;
+    if (s)
+      {
+        lanes = m_traci_client->GetEdgeLaneNumber (s->roadId);
+        current_lane = s->laneIndex;
+      }
+    else
+      {
+        lanes = m_traci_client->TraCIAPI::edge.getLaneNumber (m_traci_client->TraCIAPI::vehicle.getRoadID (m_id));
+        current_lane = m_traci_client->TraCIAPI::vehicle.getLaneIndex (m_id);
+      }
+    // ETSI enumeration policy is the opposite of SUMO's one
+    // For SUMO: lanes counting starts from 0 from the right most lane
+    // For ETSI: lanes counting starts from 1 from the left most lane
+    return lanes - current_lane;
   }
 
   VDP::VDP_position_cartesian_t
@@ -197,23 +268,18 @@ namespace ns3
   {
     MCM_mandatory_data_t MCMdata;
 
+    double k_speed, k_lon, k_lat, k_accel, k_heading;
+    readKinematics (k_speed, k_lon, k_lat, k_accel, k_heading);
+
     /* Speed [0.01 m/s] */
     if (!m_isStatic)
-      MCMdata.speed = VDPValueConfidence<> (m_traci_client->TraCIAPI::vehicle.getSpeed (m_id) * CENTI,
+      MCMdata.speed = VDPValueConfidence<> (k_speed * CENTI,
                                             SpeedConfidence_unavailable);
 
-    /* Position */
-    libsumo::TraCIPosition pos;
-    if (!m_isStatic)
-      pos=m_traci_client->TraCIAPI::vehicle.getPosition(m_id);
-    else
-      pos = m_traci_client->TraCIAPI::poi.getPosition(m_id);
-    pos=m_traci_client->TraCIAPI::simulation.convertXYtoLonLat (pos.x,pos.y);
-
     // longitude WGS84 [0,1 microdegree]
-    MCMdata.longitude=(Longitude_t)(pos.x*DOT_ONE_MICRO);
+    MCMdata.longitude=(Longitude_t)(k_lon*DOT_ONE_MICRO);
     // latitude WGS84 [0,1 microdegree]
-    MCMdata.latitude=(Latitude_t)(pos.y*DOT_ONE_MICRO);
+    MCMdata.latitude=(Latitude_t)(k_lat*DOT_ONE_MICRO);
 
     /* Altitude [0,01 m] */
     MCMdata.altitude = VDPValueConfidence<>(AltitudeValue_unavailable,
@@ -226,12 +292,12 @@ namespace ns3
 
     /* Longitudinal acceleration [0.1 m/s^2] */
     if (!m_isStatic)
-      MCMdata.longAcceleration = VDPValueConfidence<>(m_traci_client->TraCIAPI::vehicle.getAcceleration (m_id) * DECI,
+      MCMdata.longAcceleration = VDPValueConfidence<>(k_accel * DECI,
                                                        AccelerationConfidence_unavailable);
 
     /* Heading WGS84 north [0.1 degree] */
     if (!m_isStatic)
-      MCMdata.heading = VDPValueConfidence<>(m_traci_client->TraCIAPI::vehicle.getAngle (m_id) * DECI,
+      MCMdata.heading = VDPValueConfidence<>(k_heading * DECI,
                                               HeadingConfidence_unavailable);
 
     /* Drive direction (backward driving is not fully supported by SUMO, at the moment */
@@ -260,23 +326,18 @@ namespace ns3
   {
     CAM_mandatory_data_t CAMdata;
 
+    double k_speed, k_lon, k_lat, k_accel, k_heading;
+    readKinematics (k_speed, k_lon, k_lat, k_accel, k_heading);
+
     /* Speed [0.01 m/s] */
     if (!m_isStatic)
-      CAMdata.speed = VDPValueConfidence<> (m_traci_client->TraCIAPI::vehicle.getSpeed (m_id) * CENTI,
+      CAMdata.speed = VDPValueConfidence<> (k_speed * CENTI,
                                             SpeedConfidence_unavailable);
 
-    /* Position */
-    libsumo::TraCIPosition pos;
-    if (!m_isStatic)
-      pos=m_traci_client->TraCIAPI::vehicle.getPosition(m_id);
-    else
-      pos = m_traci_client->TraCIAPI::poi.getPosition(m_id);
-    pos=m_traci_client->TraCIAPI::simulation.convertXYtoLonLat (pos.x,pos.y);
-
     // longitude WGS84 [0,1 microdegree]
-    CAMdata.longitude=(Longitude_t)(pos.x*DOT_ONE_MICRO);
+    CAMdata.longitude=(Longitude_t)(k_lon*DOT_ONE_MICRO);
     // latitude WGS84 [0,1 microdegree]
-    CAMdata.latitude=(Latitude_t)(pos.y*DOT_ONE_MICRO);
+    CAMdata.latitude=(Latitude_t)(k_lat*DOT_ONE_MICRO);
 
     /* Altitude [0,01 m] */
     CAMdata.altitude = VDPValueConfidence<>(AltitudeValue_unavailable,
@@ -289,12 +350,12 @@ namespace ns3
 
     /* Longitudinal acceleration [0.1 m/s^2] */
     if (!m_isStatic)
-      CAMdata.longAcceleration = VDPValueConfidence<>(m_traci_client->TraCIAPI::vehicle.getAcceleration (m_id) * DECI,
+      CAMdata.longAcceleration = VDPValueConfidence<>(k_accel * DECI,
                                                   AccelerationConfidence_unavailable);
 
     /* Heading WGS84 north [0.1 degree] */
     if (!m_isStatic)
-      CAMdata.heading = VDPValueConfidence<>(m_traci_client->TraCIAPI::vehicle.getAngle (m_id) * DECI,
+      CAMdata.heading = VDPValueConfidence<>(k_heading * DECI,
                                          HeadingConfidence_unavailable);
 
     /* Drive direction (backward driving is not fully supported by SUMO, at the moment */
@@ -315,13 +376,7 @@ namespace ns3
     CAMdata.yawRate = VDPValueConfidence<>(YawRateValue_unavailable,
                                            YawRateConfidence_unavailable);
 
-    int lanes = m_traci_client->TraCIAPI::edge.getLaneNumber (m_traci_client->TraCIAPI::vehicle.getRoadID (m_id));
-    int current_lane = m_traci_client->TraCIAPI::vehicle.getLaneIndex (m_id);
-    // ETSI enumeration policy is the opposite of SUMO's one
-    // For SUMO: lanes counting starts from 0 from the right most lane
-    // For ETSI: lanes counting starts from 1 from the left most lane
-    current_lane = lanes - current_lane;
-    CAMdata.lane = current_lane;
+    CAMdata.lane = m_isStatic ? 0 : readLanePosition ();
 
     return CAMdata;
   }
@@ -331,23 +386,18 @@ namespace ns3
   {
     CPM_mandatory_data_t CPMdata;
 
+    double k_speed, k_lon, k_lat, k_accel, k_heading;
+    readKinematics (k_speed, k_lon, k_lat, k_accel, k_heading);
+
     /* Speed [0.01 m/s] */
     if (!m_isStatic)
-      CPMdata.speed = VDPValueConfidence<> (m_traci_client->TraCIAPI::vehicle.getSpeed (m_id) * CENTI,
+      CPMdata.speed = VDPValueConfidence<> (k_speed * CENTI,
                                             SpeedConfidence_unavailable);
 
-    /* Position */
-    libsumo::TraCIPosition pos;
-    if(!m_isStatic)
-      pos=m_traci_client->TraCIAPI::vehicle.getPosition(m_id);
-    else
-      pos = m_traci_client->TraCIAPI::poi.getPosition(m_id);
-    pos=m_traci_client->TraCIAPI::simulation.convertXYtoLonLat (pos.x,pos.y);
-
     // longitude WGS84 [0,1 microdegree]
-    CPMdata.longitude=(Longitude_t)(pos.x*DOT_ONE_MICRO);
+    CPMdata.longitude=(Longitude_t)(k_lon*DOT_ONE_MICRO);
     // latitude WGS84 [0,1 microdegree]
-    CPMdata.latitude=(Latitude_t)(pos.y*DOT_ONE_MICRO);
+    CPMdata.latitude=(Latitude_t)(k_lat*DOT_ONE_MICRO);
 
     /* Altitude [0,01 m] */
     CPMdata.altitude = VDPValueConfidence<>(AltitudeValue_unavailable,
@@ -360,12 +410,12 @@ namespace ns3
 
     /* Longitudinal acceleration [0.1 m/s^2] */
     if(!m_isStatic)
-      CPMdata.longAcceleration = VDPValueConfidence<>(m_traci_client->TraCIAPI::vehicle.getAcceleration (m_id) * DECI,
+      CPMdata.longAcceleration = VDPValueConfidence<>(k_accel * DECI,
                                                   AccelerationConfidence_unavailable);
 
     /* Heading WGS84 north [0.1 degree] */
     if(!m_isStatic)
-      CPMdata.heading = VDPValueConfidence<>(m_traci_client->TraCIAPI::vehicle.getAngle (m_id) * DECI,
+      CPMdata.heading = VDPValueConfidence<>(k_heading * DECI,
                                          HeadingConfidence_unavailable);
 
     /* Drive direction (backward driving is not fully supported by SUMO, at the moment */
@@ -394,10 +444,7 @@ namespace ns3
   {
     if (m_isStatic)
       return VDPDataItem<int>((int)NULL);
-    int lanePosition;
-
-    int lanes = m_traci_client->TraCIAPI::edge.getLaneNumber (m_traci_client->TraCIAPI::vehicle.getRoadID (m_id));
-    lanePosition = lanes - m_traci_client->TraCIAPI::vehicle.getLaneIndex (m_id);
+    int lanePosition = readLanePosition ();
 
     if (lanePosition < 0 || lanePosition > 14)
       {
