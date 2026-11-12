@@ -354,7 +354,9 @@ main (int argc, char *argv[])
       std::cout << "Average PRR: " << metSup->getAveragePRR_overall () << std::endl;
       std::cout << "Average latency (ms): " << metSup->getAverageLatency_overall () << std::endl;
 
-      for(int i=1;i<numberOfNodes+1;i++) {
+      // StationID = stol("vehN".substr(3)) = 0..N-1 (antes 1..N: veh0 no salía
+      // y la última fila eran ceros de una entrada inexistente)
+      for(int i=0;i<numberOfNodes;i++) {
           std::cout << "Average latency of vehicle " << i << " (ms): " << metSup->getAverageLatency_vehicle (i) << std::endl;
           std::cout << "Average PRR of vehicle " << i << " (%): " << metSup->getAveragePRR_vehicle (i) << std::endl;
           std::cout << "Total number of TX packets by vehicle " << i << ": " << metSup->getNumberTx_vehicle(i) << std::endl;

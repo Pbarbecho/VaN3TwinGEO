@@ -29,6 +29,11 @@
 #include <string>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/wait.h>
+#include <sys/prctl.h>
+#include <signal.h>
+#include <cerrno>
+#include <cstring>
 
 #include "traci-client.h"
 
@@ -316,6 +321,36 @@ namespace ns3
         terminateVehicleVisualizer();
         NS_FATAL_ERROR("Problem while closing traci socket: " << e.what());
       }
+    // --quit-on-end ya hace salir a SUMO tras el close; aquí solo se recoge
+    // (o se mata si seguía vivo, p. ej. esperando a otro cliente TraCI).
+    KillSumo();
+  }
+
+  void
+  TraciClient::KillSumo(void)
+  {
+    if (m_sumoPid <= 0)
+      {
+        return;
+      }
+    pid_t pid = m_sumoPid;
+    m_sumoPid = -1;
+    int status = 0;
+    // hasta ~2 s de gracia para que termine solo; luego SIGTERM y, si no, SIGKILL
+    for (int i = 0; i < 8; i++)
+      {
+        if (waitpid(pid, &status, WNOHANG) == pid)
+          {
+            return;
+          }
+        if (i == 0)
+          {
+            kill(pid, SIGTERM);
+          }
+        usleep(250000);
+      }
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
   }
 
   std::string
@@ -399,7 +434,7 @@ namespace ns3
 
     // sumo additional command line options
     m_sumoCommand += " " + m_sumoAddCmdOpt;
-    m_sumoCommand += " --start --quit-on-end &";
+    m_sumoCommand += " --start --quit-on-end";
 
     return m_sumoCommand;
   }
@@ -425,22 +460,82 @@ namespace ns3
         NS_LOG_INFO("SUMO will be launched on Network namespace: " + m_netns_name);
     }
 
-    // start up sumo
-    int startCmd = std::system(m_sumoCommand.c_str());
-    if (startCmd)
+    // start up sumo. Antes: std::system("sumo ... &"): el shell lanzaba SUMO
+    // en segundo plano con SIGINT ignorado y sin guardar el PID, así que un
+    // Ctrl+C a ns-3 (o cualquier NS_FATAL_ERROR) dejaba un SUMO huérfano
+    // esperando clientes TraCI y la siguiente corrida saltaba de puerto.
+    // Ahora: fork + exec directo (sin "&"), el hijo pide SIGTERM si muere el
+    // padre (PR_SET_PDEATHSIG) y el padre guarda el PID para KillSumo().
+    NS_LOG_INFO("Starting SUMO with: " << m_sumoCommand);
+    m_sumoPid = fork();
+    if (m_sumoPid < 0)
       {
-        NS_LOG_INFO("Used the following command to start up sumo: " << m_sumoCommand);
+        terminateVehicleVisualizer();
+        NS_FATAL_ERROR("Can not fork to start SUMO: " << std::strerror(errno));
+      }
+    if (m_sumoPid == 0)
+      {
+        // --- hijo ---
+        prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (getppid() == 1)
+          {
+            _exit(1);              // el padre murió antes del prctl
+          }
+        signal(SIGINT, SIG_DFL);
+        std::string cmd = "exec " + m_sumoCommand;   // exec: SUMO sustituye al sh
+        execl("/bin/sh", "sh", "-c", cmd.c_str(), (char*) nullptr);
+        _exit(127);
       }
 
-    // wait 1 sec (=1e6 microsec) until sumo opens socket for traci connection
+    // Esperar a que SUMO abra el socket TraCI: la espera fija (SumoWaitForSocket,
+    // 1 s) no bastaba con redes grandes (netconvert multimodal, polígonos...) y
+    // el único intento de connect() abortaba dejando SUMO vivo. Ahora se
+    // reintenta cada 250 ms hasta SUMO_CONNECT_TIMEOUT_S, vigilando que el hijo
+    // siga vivo.
+    const double SUMO_CONNECT_TIMEOUT_S = 90.0;
     std::cout << "Sumo: wait for socket: " << m_sumoWaitForSocket.GetSeconds() << "s" << std::endl;
     usleep(m_sumoWaitForSocket.GetMicroSeconds());
 
-    // connect to sumo via traci
+    bool connected = false;
+    std::string lastError;
+    double waited = m_sumoWaitForSocket.GetSeconds();
+    while (!connected)
+      {
+        try
+          {
+            // this->TraCIAPI::connect("172.23.208.1", m_sumoPort); // <- Windows SUMO under WSL2
+            this->TraCIAPI::connect("localhost", m_sumoPort);
+            connected = true;
+          }
+        catch (std::exception& e)
+          {
+            lastError = e.what();
+            int status = 0;
+            if (m_sumoPid > 0 && waitpid(m_sumoPid, &status, WNOHANG) == m_sumoPid)
+              {
+                m_sumoPid = -1;
+                terminateVehicleVisualizer();
+                NS_FATAL_ERROR("SUMO terminated before accepting the TraCI connection (status "
+                               << status << "). Command: " << m_sumoCommand);
+              }
+            if (waited >= SUMO_CONNECT_TIMEOUT_S)
+              {
+                KillSumo();
+                terminateVehicleVisualizer();
+                NS_FATAL_ERROR("Can not connect to sumo via traci after " << waited
+                               << " s: " << lastError);
+              }
+            usleep(250000);
+            waited += 0.25;
+          }
+      }
+    if (waited > m_sumoWaitForSocket.GetSeconds())
+      {
+        std::cout << "Sumo: socket ready after " << waited << "s" << std::endl;
+      }
+
     try
       {
-        // this->TraCIAPI::connect("172.23.208.1", m_sumoPort); // <- to connect to the Windows version of SUMO under WSL2 (Windows "host IP" needs to be customized)
-        this->TraCIAPI::connect("localhost", m_sumoPort);
         // SUMO multi-cliente (--num-clients N): declarar orden 1 (ns-3 manda).
         // Inocuo con un solo cliente; solo se activa si se pidió --num-clients
         // vía SumoAdditionalCmdOptions. Ver GUIA_INTEGRACION_SUMO_GEO.md.
@@ -451,8 +546,9 @@ namespace ns3
       }
     catch (std::exception& e)
       {
+        KillSumo();
         terminateVehicleVisualizer();
-        NS_FATAL_ERROR("Can not connect to sumo via traci: " << e.what());
+        NS_FATAL_ERROR("TraCI setOrder failed: " << e.what());
       }
 
     if (m_vehicle_visualizer!=nullptr && m_vehicle_visualizer->isConnected())
@@ -822,6 +918,8 @@ TraciClient::terminateVehicleVisualizer(void)
   {
       m_vehicle_visualizer->terminateServer ();
   }
+  // todas las salidas por error pasan por aquí: no dejar SUMO huérfano
+  KillSumo();
 }
 
 bool

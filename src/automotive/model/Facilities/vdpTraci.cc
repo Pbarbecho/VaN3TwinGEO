@@ -223,15 +223,33 @@ namespace ns3
   {
     const VehicleSnapshot* s = m_traci_client->GetSnapshot (m_id);
     int lanes, current_lane;
-    if (s)
+    try
       {
-        lanes = m_traci_client->GetEdgeLaneNumber (s->roadId);
-        current_lane = s->laneIndex;
+        if (s)
+          {
+            if (s->roadId.empty ())
+              {
+                return LanePosition_offTheRoad;   // teletransporte / fuera de la red
+              }
+            lanes = m_traci_client->GetEdgeLaneNumber (s->roadId);
+            current_lane = s->laneIndex;
+          }
+        else
+          {
+            std::string roadId = m_traci_client->TraCIAPI::vehicle.getRoadID (m_id);
+            if (roadId.empty ())
+              {
+                return LanePosition_offTheRoad;
+              }
+            lanes = m_traci_client->TraCIAPI::edge.getLaneNumber (roadId);
+            current_lane = m_traci_client->TraCIAPI::vehicle.getLaneIndex (m_id);
+          }
       }
-    else
+    catch (std::exception& e)
       {
-        lanes = m_traci_client->TraCIAPI::edge.getLaneNumber (m_traci_client->TraCIAPI::vehicle.getRoadID (m_id));
-        current_lane = m_traci_client->TraCIAPI::vehicle.getLaneIndex (m_id);
+        // una excepción TraCI aquí (arista desconocida) escapaba del bucle de
+        // eventos de ns-3 y abortaba toda la simulación
+        return LanePosition_offTheRoad;
       }
     // ETSI enumeration policy is the opposite of SUMO's one
     // For SUMO: lanes counting starts from 0 from the right most lane

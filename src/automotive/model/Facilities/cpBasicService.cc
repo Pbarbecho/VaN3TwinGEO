@@ -18,6 +18,7 @@
 */
 
 #include "cpBasicService.h"
+#include <algorithm>
 #include "ns3/snr-tag.h"
 #include "ns3/sinr-tag.h"
 #include "ns3/rssi-tag.h"
@@ -257,17 +258,21 @@ namespace ns3 {
                     asn1cpp::setField (angle->zAngle.confidence, AngleConfidence_unavailable);
                     asn1cpp::setField (PO->angles, angle);
                     auto OD1 = asn1cpp::makeSeq (ObjectDimension);
-                    if (it->vehData.vehicleLength.getData () < 1023 &&
-                        it->vehData.vehicleLength.getData () > 0)
-                      asn1cpp::setField (OD1->value, it->vehData.vehicleLength.getData ());
+                    // ObjectDimensionValue es (1..256) en el ASN.1 del CPM (255 =
+                    // outOfRange), NO (1..1023) como VehicleLengthValue del CAM:
+                    // un tranvía (32,5 m -> 325) o un bus largo hacía fallar la
+                    // codificación UPER y el CPM se descartaba en silencio.
+                    if (it->vehData.vehicleLength.getData () > 0)
+                      asn1cpp::setField (OD1->value, std::min<long> (it->vehData.vehicleLength.getData (),
+                                                                      ObjectDimensionValue_outOfRange));
                     else
                       asn1cpp::setField (OD1->value, 50); //usual value for SUMO vehicles
                     asn1cpp::setField (OD1->confidence, ObjectDimensionConfidence_unavailable);
                     asn1cpp::setField (PO->objectDimensionX, OD1);
                     auto OD2 = asn1cpp::makeSeq (ObjectDimension);
-                    if (it->vehData.vehicleWidth.getData () < 1023 &&
-                        it->vehData.vehicleWidth.getData () > 0)
-                      asn1cpp::setField (OD2->value, it->vehData.vehicleWidth.getData ());
+                    if (it->vehData.vehicleWidth.getData () > 0)
+                      asn1cpp::setField (OD2->value, std::min<long> (it->vehData.vehicleWidth.getData (),
+                                                                      ObjectDimensionValue_outOfRange));
                     else
                       asn1cpp::setField (OD2->value, 18); //usual value for SUMO vehicles
                     asn1cpp::setField (OD2->confidence, ObjectDimensionConfidence_unavailable);

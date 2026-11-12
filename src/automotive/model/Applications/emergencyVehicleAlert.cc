@@ -245,13 +245,34 @@ namespace ns3
     }
 
     /* Set Station Type in DENBasicService */
+    // StationType ETSI a partir de la vClass de SUMO. Antes solo "passenger" y
+    // "emergency": buses, tranvías, bicis y motos salían como "unknown" (0) en
+    // CAM/DENM, en el LDM y en el visor.
     StationType_t stationtype;
-    if (m_type=="passenger")
+    if (m_type=="passenger" || m_type=="taxi" || m_type=="evehicle" || m_type=="private"
+        || m_type=="vip" || m_type=="hov" || m_type=="custom1" || m_type=="custom2")
       stationtype = StationType_passengerCar;
     else if (m_type=="emergency"){
       stationtype = StationType_specialVehicle;
       m_LDM->enablePolygons (); // Uncomment to enable detected object polygon visualization for this specific vehicle
       }
+    else if (m_type=="bus" || m_type=="coach")
+      stationtype = StationType_bus;
+    else if (m_type=="tram" || m_type=="rail" || m_type=="rail_urban" || m_type=="rail_electric"
+             || m_type=="rail_fast" || m_type=="subway")
+      stationtype = StationType_tram;
+    else if (m_type=="bicycle")
+      stationtype = StationType_cyclist;
+    else if (m_type=="motorcycle")
+      stationtype = StationType_motorcycle;
+    else if (m_type=="moped")
+      stationtype = StationType_moped;
+    else if (m_type=="delivery")
+      stationtype = StationType_lightTruck;
+    else if (m_type=="truck" || m_type=="trailer")
+      stationtype = StationType_heavyTruck;
+    else if (m_type=="pedestrian")
+      stationtype = StationType_pedestrian;
     else
       stationtype = StationType_unknown;
 
@@ -397,7 +418,12 @@ namespace ns3
    m_cam_received++;
 
    /* If the CAM is received from an emergency vehicle, and the host vehicle is a "passenger" car, then process the CAM */
-   if (asn1cpp::getField(cam->cam.camParameters.basicContainer.stationType,StationType_t)==StationType_specialVehicle && m_type!="emergency")
+   // Solo los vehículos de carretera a motor ceden el paso: un tranvía no puede
+   // cambiar de carril ni una bici acelerar al 150 % de su velocidad.
+   bool roadMotorVehicle = (m_type!="emergency" && m_type!="tram" && m_type!="rail"
+                            && m_type!="rail_urban" && m_type!="rail_electric" && m_type!="rail_fast"
+                            && m_type!="subway" && m_type!="bicycle" && m_type!="pedestrian");
+   if (asn1cpp::getField(cam->cam.camParameters.basicContainer.stationType,StationType_t)==StationType_specialVehicle && roadMotorVehicle)
    {
      libsumo::TraCIPosition pos=m_client->TraCIAPI::vehicle.getPosition(m_id);
      pos=m_client->TraCIAPI::simulation.convertXYtoLonLat (pos.x,pos.y);

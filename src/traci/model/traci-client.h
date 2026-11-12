@@ -96,6 +96,11 @@ public:
   void SumoSetup(STARTUP_FCN includeNode, SHUTDOWN_FCN excludeNode);
 
   void SumoStop();
+  /* Mata el proceso SUMO lanzado por SumoSetup (si sigue vivo) y lo recoge.
+   * Se llama desde SumoStop y desde todas las salidas por error: antes SUMO
+   * quedaba huérfano (y bloqueado esperando clientes TraCI) tras un Ctrl+C
+   * o un NS_FATAL_ERROR, obligando a 'pkill -x sumo'. */
+  void KillSumo(void);
 
   // get associated sumo vehicle for ns3 node
   std::string GetVehicleId(Ptr<Node> node);
@@ -171,6 +176,7 @@ private:
   // simulation specific data members
   std::string m_sumoAddCmdOpt;
   std::string m_sumoCommand;
+  pid_t m_sumoPid = -1;            // hijo SUMO (fork+exec); -1 = no lanzado
   std::string m_sumoConfigPath;
   std::string m_sumoBinaryPath;
   uint16_t m_sumoPort;
